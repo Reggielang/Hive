@@ -1,0 +1,316 @@
+十一、压缩
+
+MR 支持的压缩编码
+压缩格式	算法	文件扩展名	是否可切分
+DEFLATE	DEFLATE	.deflate		否
+Gzip	DEFLATE	.gz		否
+bzip2	bzip2	.bz2		是
+LZO	LZO	.lzo		是
+Snappy	Snappy	.snappy		否
+
+
+开启 Map 输出阶段压缩（MR 引擎）
+
+开启 map 输出阶段压缩可以减少 job 中 map 和 Reduce task 间数据传输量。具体配置如下：
+（1）开启 hive 中间传输数据压缩功能
+hive (default)>set hive.exec.compress.intermediate=true;
+（2）开启 mapreduce 中 map 输出压缩功能
+hive (default)>set mapreduce.map.output.compress=true;
+（3）设置 mapreduce 中 map 输出数据的压缩方式
+set mapreduce.map.output.compress.codec=org.apache.hadoop.io.compress.SnappyCodec;
+（4）执行查询语句
+hive (default)> select count(ename) name from emp;
+
+开启 Reduce 输出阶段压缩
+当 Hive 将 输 出 写 入 到 表 中 时 ， 输 出 内 容 同 样 可 以 进 行 压 缩 。 属 性hive.exec.compress.output控制着这个功能。用户可能需要保持默认设置文件中的默认值false，这样默认的输出就是非压缩的纯文本文件了。用户可以通过在查询语句或执行脚本中设置这个值为 true，来开启输出结果压缩功能。
+
+（1）开启 hive 最终输出数据压缩功能
+hive (default)>set hive.exec.compress.output=true;
+（2）开启 mapreduce 最终输出数据压缩
+hive (default)>set mapreduce.output.fileoutputformat.compress=true;
+（3）设置 mapreduce 最终数据输出压缩方式
+set mapreduce.output.fileoutputformat.compress.codec = org.apache.hadoop.io.compress.SnappyCodec;
+（4）设置 mapreduce 最终数据输出压缩为块压缩
+hive (default)> set mapreduce.output.fileoutputformat.compress.type=BLOCK;
+（5）测试一下输出结果是否是压缩文件
+insert overwrite local directory '/opt/module/data/distribute-result' select * from emp distribute by deptno sort by empno desc;
+
+文件存储格式
+Hive 支持的存储数据的格式主要有：TEXTFILE 、SEQUENCEFILE、ORC、PARQUET。
+
+1）行存储的特点
+查询满足条件的一整行数据的时候，列存储则需要去每个聚集的字段找到对应的每个列的值，行存储只需要找到其中一个值，其余的值都在相邻地方，所以此时行存储查询的速度更快。
+2）列存储的特点
+因为每个字段的数据聚集存储，在查询只需要少数几个字段的时候，能大大减少读取的数据量；每个字段的数据类型一定是相同的，列式存储可以针对性的设计更好的设计压缩算法。
+
+TEXTFILE 和 SEQUENCEFILE 的存储格式都是基于行存储的；
+ORC 和 PARQUET 是基于列式存储的。
+
+TextFile 格式
+默认格式，数据不做压缩，磁盘开销大，数据解析开销大。可结合 Gzip、Bzip2 使用，但使用 Gzip 这种方式，hive 不会对数据进行切分，从而无法对数据进行并行操作。
+
+Orc 格式 -列式存储
+Orc (Optimized Row Columnar)是 Hive 0.11 版里引入的新的存储格式。
+每个 Orc 文件由 1 个或多个 stripe 组成，每个 stripe 一般为 HDFS的块大小，每一个 stripe 包含多条记录，这些记录按照列进行独立存储，对应到 Parquet中的 row group 的概念。每个 Stripe 里有三部分组成，分别是 Index Data，Row Data，Stripe Footer：
+1）Index Data：一个轻量级的 index，默认是每隔 1W 行做一个索引。这里做的索引应该
+只是记录某行的各字段在 Row Data 中的 offset。
+2）Row Data：存的是具体的数据，先取部分行，然后对这些行按列进行存储。对每个
+列进行了编码，分成多个 Stream 来存储。
+3）Stripe Footer：存的是各个 Stream 的类型，长度等信息。
+每个文件有一个 File Footer，这里面存的是每个 Stripe 的行数，每个 Column 的数据类型信息等；每个文件的尾部是一个 PostScript，这里面记录了整个文件的压缩类型以及FileFooter 的长度信息等。在读取文件时，会 seek 到文件尾部读 PostScript，从里面解析到File Footer 长度，再读 FileFooter，从里面解析到各个 Stripe 信息，再读各个 Stripe，即从后往前读。
+
+Parquet 格式
+Parquet 文件是以二进制方式存储的，所以是不可以直接读取的，文件中包括该文件的数据和元数据，因此 Parquet 格式文件是自解析的。
+（1）行组(Row Group)：每一个行组包含一定的行数，在一个 HDFS 文件中至少存储一个行组，类似于 orc 的 stripe 的概念。
+（2）列块(Column Chunk)：在一个行组中每一列保存在一个列块中，行组中的所有列连续的存储在这个行组文件中。一个列块中的值都是相同类型的，不同的列块可能使用不同的算法进行压缩。
+（3）页(Page)：每一个列块划分为多个页，一个页是最小的编码的单位，在同一个列块
+的不同页可能使用不同的编码方式。通常情况下，在存储 Parquet 数据的时候会按照 Block 大小设置行组的大小，由于一般情况下每一个 Mapper 任务处理数据的最小单位是一个 Block，这样可以把每一个行组由一个 Mapper 任务处理，增大任务执行并行度。Parquet 文件的格式。
+
+主流文件存储格式对比实验
+从存储文件的压缩比和查询速度两个角度对比。
+
+2）TextFile
+（1）创建表，存储数据格式为 TEXTFILE
+create table log_text (
+track_time string,
+url string,
+session_id string,
+referer string,
+ip string,
+end_user_id string,
+city_id string
+)
+row format delimited fields terminated by '\t'
+stored as textfile;
+（2）向表中加载数据
+hive (default)> load data local inpath '/opt/module/hive/datas/log.data'
+into table log_text ;
+（3）查看表中数据大小
+hive (default)> dfs -du -h /user/hive/warehouse/log_text;
+18.13 M /user/hive/warehouse/log_text/log.data
+
+3）ORC
+（1）创建表，存储数据格式为 ORC
+create table log_orc(track_time string,url string,session_id string,referer string,ip string,end_user_id string,city_id string)
+row format delimited fields terminated by '\t'
+stored as orc tblproperties("orc.compress"="NONE"); -- 设置 orc 存储不使用压缩
+（2）向表中加载数据
+hive (default)> insert into table log_orc select * from log_text;
+（3）查看表中数据大小
+hive (default)> dfs -du -h /user/hive/warehouse/log_orc/ ;
+7.7 M /user/hive/warehouse/log_orc/000000_0
+
+4）Parquet
+（1）创建表，存储数据格式为 parquet
+create table log_parquet(track_time string,url string,session_id string,referer string,ip string,end_user_id string,city_id string)
+row format delimited fields terminated by '\t' 
+stored as parquet;
+（2）向表中加载数据
+hive (default)> insert into table log_parquet select * from log_text;
+（3）查看表中数据大小
+hive (default)> dfs -du -h /user/hive/warehouse/log_parquet/;
+13.1 M /user/hive/warehouse/log_parquet/000000_0
+
+存储文件的对比总结：
+ORC > Parquet > textFile
+
+存储文件的查询速度测试：查询速度相近。
+（1）TextFile
+hive (default)> insert overwrite local directory
+'/opt/module/data/log_text' select substring(url,1,4) from log_text;
+（2）ORC
+hive (default)> insert overwrite local directory
+'/opt/module/data/log_orc' select substring(url,1,4) from log_orc;
+（3）Parquet
+hive (default)> insert overwrite local directory
+'/opt/module/data/log_parquet' select substring(url,1,4) from log_parquet;
+
+存储和压缩结合之后的文件
+4）存储方式和压缩总结
+ZLIB 比 Snappy 压缩的还小。原因是 ZLIB 采用的是 deflate 压缩算法。比 snappy 压缩的压缩率高。
+在实际的项目开发当中，hive 表的数据存储格式一般选择：orc 或 parquet。压缩方式一般选择 snappy，lzo
+2）创建一个 SNAPPY 压缩的 ORC 存储方式
+（1）建表语句
+create table log_orc_snappy(track_time string,url string,session_id string,referer string,ip string,end_user_id string,city_id string)
+row format delimited fields terminated by '\t'
+stored as orc
+tblproperties("orc.compress"="SNAPPY");
+（2）插入数据
+insert into log_orc_snappy select * from log_text;
+（3）查看插入后数据
+hive (default)> dfs -du -h /user/hive/warehouse/log_orc_snappy/;
+3.75 M /user/hive/warehouse/log_orc_snappy/000000_0
+
+十二、优化
+执行计划（Explain）
+EXPLAIN [EXTENDED | DEPENDENCY | AUTHORIZATION] query
+
+Fetch 抓取
+Fetch 抓取是指，Hive 中对某些情况的查询可以不必使用 MapReduce 计算。例如：SELECT* FROM employees;在这种情况下，Hive 可以简单地读取 employee 对应的存储目录下的文件，然后输出查询结果到控制台。在 hive-default.xml.template 文件中 hive.fetch.task.conversion 默认是 more，老版本 hive 默认是 minimal，该属性修改为 more 以后，在全局查找、字段查找、limit 查找等都不走mapreduce。
+
+本地模式 （默认是关闭的）
+大多数的 Hadoop Job 是需要 Hadoop 提供的完整的可扩展性来处理大数据集的。不过，有时 Hive 的输入数据量是非常小的。在这种情况下，为查询触发执行任务消耗的时间可能会比实际 job 的执行时间要多的多。对于大多数这种情况，Hive 可以通过本地模式在单台机器上处理所有的任务。对于小数据集，执行时间可以明显被缩短。用户可以通过设置 hive.exec.mode.local.auto 的值为 true，来让 Hive 在适当的时候自动启动这个优化。
+
+（1）开启本地模式，并执行查询语句
+hive (default)> set hive.exec.mode.local.auto=true;
+hive (default)> select count(*) from emp group by deptno;
+
+表的优化
+小表大表 Join（MapJOIN）
+将 key 相对分散，并且数据量小的表放在 join 的左边，可以使用 map join 让小的维度表先进内存。在 map 端完成 join。
+
+实际测试发现：新版的 hive 已经对小表 JOIN 大表和大表 JOIN 小表进行了优化。小表放在左边和右边已经没有区别。
+
+空 KEY 过滤 （条件，非inner join 然后也不想要null值）
+有时 join 超时是因为某些 key 对应的数据太多，而相同 key 对应的数据都会发送到相同的 reducer 上，从而导致内存不够。此时我们应该仔细分析这些异常的 key，很多情况下，这些 key 对应的数据是异常数据，我们需要在 SQL 语句中进行过滤。例如 key 对应的字段为空。
+
+4）测试不过滤空 id
+hive (default)> insert overwrite table jointable select n.* from nullidtable n left join bigtable o on n.id = o.id;
+（5）测试过滤空 id
+hive (default)> insert overwrite table jointable select n.* from (select * from nullidtable where id is not null) n left join bigtable o on n.id = o.id;
+
+
+空 key 转换
+有时虽然某个 key 为空对应的数据很多，但是相应的数据不是异常数据，必须要包含在join 的结果中，此时我们可以表 a 中 key 为空的字段赋一个随机的值，使得数据随机均匀地分不到不同的 reducer 上。
+insert overwrite table jointable
+select n.* from nullidtable n left join bigtable b on n.id = b.id;
+
+insert overwrite table jointable
+select n.* from nullidtable n full join bigtable o on nvl(n.id,rand()) = o.id;
+
+SMB(Sort Merge Bucket join) 把两个大表先分桶然后再join
+
+测试大表直接 JOIN
+insert overwrite table jointable
+select b.id, b.t, b.uid, b.keyword, b.url_rank, b.click_num, b.click_url
+from bigtable s
+join bigtable2 b
+on b.id = s.id;
+
+（2）创建分通表 1,桶的个数不要超过可用 CPU 的核数
+create table bigtable_buck1(id bigint,t bigint,uid string,keyword string,url_rank int,click_num int,click_url string)
+clustered by(id)
+sorted by(id)
+into 6 buckets
+row format delimited fields terminated by '\t';
+
+load data local inpath '/opt/module/data/bigtable' into table bigtable_buck1;
+
+（3）创建分通表 2,桶的个数不要超过可用 CPU 的核数
+create table bigtable_buck2(id bigint,t bigint,uid string,keyword string,url_rank int,click_num int,click_url string)
+clustered by(id)
+sorted by(id)
+into 6 buckets
+row format delimited fields terminated by '\t';
+
+load data local inpath '/opt/module/data/bigtable' into table bigtable_buck2;
+
+（4）设置参数
+set hive.optimize.bucketmapjoin = true;
+set hive.optimize.bucketmapjoin.sortedmerge = true;
+set hive.input.format=org.apache.hadoop.hive.ql.io.BucketizedHiveInputFormat;
+（5）测试
+insert overwrite table jointable select b.id, b.t, b.uid, b.keyword, b.url_rank, b.click_num, b.click_url
+from bigtable_buck1 s
+join bigtable_buck2 b
+on b.id = s.id;
+
+Group By
+默认情况下，Map 阶段同一 Key 数据分发给一个 reduce，当一个 key 数据过大时就倾斜了。并不是所有的聚合操作都需要在 Reduce 端完成，很多聚合操作都可以先在 Map 端进行部分聚合，最后在 Reduce 端得出最终结果
+
+开启 Map 端聚合参数设置
+（1）是否在 Map 端进行聚合，默认为 True
+set hive.map.aggr = true
+（2）在 Map 端进行聚合操作的条目数目
+set hive.groupby.mapaggr.checkinterval = 100000
+（3）有数据倾斜的时候进行负载均衡（默认是 false）
+set hive.groupby.skewindata = true
+
+当选项设定为 true，生成的查询计划会有两个 MR Job。第一个 MR Job 中，Map 的输出结果会随机分布到Reduce 中，每个 Reduce 做部分聚合操作，并输出结果，这样处理的结果是相同的 Group By Key 有可能被分发到不同的 Reduce 中，从而达到负载均衡的目的；第二个 MR Job 再根据预处理的数据结果按照 Group By Key分布到 Reduce 中（这个过程可以保证相同的 Group By Key 被分布到同一个 Reduce 中），最后完成最终的聚合操作。
+
+Count(Distinct) 去重统计
+数据量小的时候无所谓，数据量大的情况下，由于 COUNT DISTINCT 操作需要用一个Reduce Task 来完成，这一个 Reduce 需要处理的数据量太大，就会导致整个 Job 很难完成，一般 COUNT DISTINCT 使用先 GROUP BY 再 COUNT 的方式替换,但是需要注意 group by 造成的数据倾斜问题.
+5）采用 GROUP by 去重 id
+hive (default)> select count(id) from (select id from bigtable group by id) a;
+虽然会多用一个 Job 来完成，但在数据量大的情况下，这个绝对是值得的。
+
+行列过滤
+列处理：在 SELECT 中，只拿需要的列，如果有分区，尽量使用分区过滤，少用 SELECT *。
+行处理：在分区剪裁中，当使用外关联时，尽量先过滤，再join。（如果将副表的过滤条件写在 Where 后面，那么就会先全表关联，之后再过滤）
+
+1）测试先关联两张表，再用 where 条件过滤
+hive (default)> select o.id from bigtable b
+join bigtable o on o.id = b.id
+where o.id <= 10;
+Time taken: 34.406 seconds, Fetched: 100 row(s)
+
+2）通过子查询后，再关联表
+hive (default)> select b.id from bigtable b
+join (select id from bigtable where id <= 10) o on b.id = o.id;
+Time taken: 30.058 seconds, Fetched: 100 row(s)
+
+合理设置 Map 及 Reduce 数
+1）通常情况下，作业会通过 input 的目录产生一个或者多个 map 任务。
+主要的决定因素有：input 的文件总个数，input 的文件大小，集群设置的文件块大小。
+
+2）是不是 map 数越多越好？答案是否定的。如果一个任务有很多小文件（远远小于块大小 128m），则每个小文件也会被当做一个块，用一个 map 任务来完成，而一个 map 任务启动和初始化的时间远远大于逻辑处理的时间，就会造成很大的资源浪费。而且，同时可执行的 map 数是受限的。
+
+3）是不是保证每个 map 处理接近 128m 的文件块，就高枕无忧了？
+答案也是不一定。比如有一个 127m 的文件，正常会用一个 map 去完成，但这个文件只有一个或者两个小字段，却有几千万的记录，如果 map 处理的逻辑比较复杂，用一个 map任务去做，肯定也比较耗时。
+针对上面的问题 2 和 3，我们需要采取两种方式来解决：即减少 map 数和增加 map 数；
+
+复杂文件增加 Map 数
+当 input 的文件都很大，任务逻辑复杂，map 执行非常慢的时候，可以考虑增加 Map 数，来使得每个 map 处理的数据量减少，从而提高任务的执行效率。增加 map 的方法为：根据computeSliteSize(Math.max(minSize,Math.min(maxSize,blocksize)))=blocksize=128M 公式，调整 maxSize 最大值。让 maxSize 最大值低于 blocksize 就可以增加 map 的个数。
+
+
+小文件进行合并
+1）在 map 执行前合并小文件，减少 map 数：CombineHiveInputFormat 具有对小文件进行合并的功能（系统默认的格式）。HiveInputFormat 没有对小文件合并功能。
+set hive.input.format= org.apache.hadoop.hive.ql.io.CombineHiveInputFormat;
+2）在 Map-Reduce 的任务结束时合并小文件的设置：
+
+在 map-only 任务结束时合并小文件，默认 true
+SET hive.merge.mapfiles = true;
+
+在 map-reduce 任务结束时合并小文件，默认 false
+SET hive.merge.mapredfiles = true;
+
+合并文件的大小，默认 256M
+SET hive.merge.size.per.task = 268435456;
+
+当输出文件的平均大小小于该值时，启动一个独立的 map-reduce 任务进行文件 merge
+SET hive.merge.smallfiles.avgsize = 16777216;
+
+合理设置 Reduce 数
+1）调整 reduce 个数方法一
+（1）每个 Reduce 处理的数据量默认是 256MB
+hive.exec.reducers.bytes.per.reducer=256000000
+
+（2）每个任务最大的 reduce 数，默认为 1009
+hive.exec.reducers.max=1009
+
+（3）计算 reducer 数的公式
+N=min(参数 2，总输入数据量/参数 1)
+
+2）调整 reduce 个数方法二
+在 hadoop 的 mapred-default.xml 文件中修改设置每个 job 的 Reduce 个数
+set mapreduce.job.reduces = 15;
+
+3）reduce 个数并不是越多越好
+（1）过多的启动和初始化 reduce 也会消耗时间和资源；
+（2）另外，有多少个 reduce，就会有多少个输出文件，如果生成了很多个小文件，那么如果这些小文件作为下一个任务的输入，则也会出现小文件过多的问题；在设置 reduce 个数的时候也需要考虑这两个原则：处理大数据量利用合适的 reduce 数；使单个 reduce 任务处理数据量大小要合适；
+
+并行执行
+Hive 会将一个查询转化成一个或者多个阶段。这样的阶段可以是 MapReduce 阶段、抽样阶段、合并阶段、limit 阶段。或者 Hive 执行过程中可能需要的其他阶段。默认情况下，Hive 一次只会执行一个阶段。不过，某个特定的 job 可能包含众多的阶段，而这些阶段可能并非完全互相依赖的，也就是说有些阶段是可以并行执行的，这样可能使得整个 job 的执行时间缩短。不过，如果有更多的阶段可以并行执行，那么 job 可能就越快完成。
+
+通过设置参数 hive.exec.parallel 值为 true，就可以开启并发执行。不过，在共享集群中，需要注意下，如果 job 中并行阶段增多，那么集群利用率就会增加。
+
+Hive 可以通过设置防止一些危险操作：
+1）分区表不使用分区过滤
+将 hive.strict.checks.no.partition.filter 设置为 true 时，对于分区表，除非 where 语句中含有分区字段过滤条件来限制范围，否则不允许执行。换句话说，就是用户不允许扫描所有分区。进行这个限制的原因是，通常分区表都拥有非常大的数据集，而且数据增加迅速。没有进行分区限制的查询可能会消耗令人不可接受的巨大资源来处理这个表。
+
+2）使用 order by 没有 limit 过滤
+将 hive.strict.checks.orderby.no.limit 设置为 true 时，对于使用了 order by 语句的查询，要求必须使用 limit 语句。因为 order by 为了执行排序过程会将所有的结果数据分发到同一个Reducer 中进行处理，强制要求用户增加这个 LIMIT 语句可以防止 Reducer 额外执行很长一段时间。
+
+3）笛卡尔积
+将 hive.strict.checks.cartesian.product 设置为 true 时，会限制笛卡尔积的查询。对关系型数据库非常了解的用户可能期望在 执行 JOIN 查询的时候不使用 ON 语句而是使用 where 语句，这样关系数据库的执行优化器就可以高效地将 WHERE 语句转化成那个 ON 语句。不幸的是，Hive 并不会执行这种优化，因此，如果表足够大，那么这个查询就会出现不可控的情况。
+
