@@ -113,6 +113,6 @@ select sort_array(friends) from test3;
 
 grouping_set:¶àÎ¬·ÖÎö
 
-
+select deptid,gender,count(*) from staff group by deptid,gender grouping sets((deptid,gender),deptid,gender,());
 
 

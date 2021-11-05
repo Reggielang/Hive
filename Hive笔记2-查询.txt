@@ -444,7 +444,7 @@ LATERAL VIEW
 
 select movie, category_name from movie_info lateral VIEW explode(split(category,',')) movie_info_temp as category_name;
 
-窗口函数（开窗函数）
+窗口函数（开窗函数）但是效率比group by 低
 OVER()：指定分析函数工作的数据窗口大小，这个数据窗口大小可能会随着行的变而变化
 
 URRENT ROW：当前行
@@ -492,9 +492,9 @@ from score;
 每门学科前三名
 select name,subject,score from (select *,rank() over(partition by subject order by score desc) rk  from score) t1 where rk <=3 ;
 
+其他常用函数.txt
 
-
-
-
-
-
+自定义函数
+java里写好自定义函数打包上传到hive下的lib目录中
+add jar linux_jar_path
+create temporary function my_len as "udf.MyUDF";
